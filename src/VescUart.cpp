@@ -75,11 +75,24 @@ int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
 	TickType_t remaining = pdMS_TO_TICKS(_TIMEOUT);
 	vTaskSetTimeOutState(&timeOut);
 
+	// Bytes read from the transport but not handled yet.
+	uint8_t chunk[64];
+	int chunkLength = 0;
+	int chunkIndex = 0;
+
 	while (messageRead == false && xTaskCheckForTimeOut(&timeOut, &remaining) == pdFALSE) {
 
-		// Blocks this task until a byte arrives or the time left runs out.
+		// Blocks this task until bytes arrive or the time left runs out. Reads one byte until the
+		// length is known, then the rest of the packet, so it never takes bytes past its end.
+		if (chunkIndex >= chunkLength) {
+			int wanted = counter < 2 ? 1 : endMessage - counter;
+			if (wanted > (int) sizeof(chunk)) wanted = sizeof(chunk);
+			chunkLength = serialPort->read(chunk, wanted, remaining);
+			chunkIndex = 0;
+		}
 		uint8_t byte;
-		if (serialPort->read(&byte, 1, remaining) == 1) {
+		if (chunkIndex < chunkLength) {
+			byte = chunk[chunkIndex++];
 
 			// Skip bytes until the start of a short packet.
 			if (counter == 0 && byte != 2) {
