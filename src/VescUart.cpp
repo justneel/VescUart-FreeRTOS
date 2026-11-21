@@ -113,6 +113,11 @@ int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
 				break;
 			}
 
+			if (counter == endMessage && messageReceived[endMessage - 1] != 3) {
+				VESC_LOGD("Invalid end byte %u", messageReceived[endMessage - 1]);
+				break;
+			}
+
 			if (counter == endMessage && messageReceived[endMessage - 1] == 3) {
 				messageReceived[endMessage] = 0;
 				VESC_LOGD("End of message reached!");
