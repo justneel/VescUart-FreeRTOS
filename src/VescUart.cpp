@@ -36,6 +36,8 @@ VescUart::VescUart(uint32_t timeout_ms) : _TIMEOUT(timeout_ms) {
 	nunchuck.valueY         = 127;
 	nunchuck.lowerButton  	= false;
 	nunchuck.upperButton  	= false;
+	memset(&data, 0, sizeof(data));
+	memset(&fw_version, 0, sizeof(fw_version));
 #if configSUPPORT_STATIC_ALLOCATION
 	mutex = xSemaphoreCreateRecursiveMutexStatic(&mutexBuffer);
 #else
