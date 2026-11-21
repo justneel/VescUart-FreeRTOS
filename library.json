@@ -1,0 +1,20 @@
+{
+  "name": "VescUart-FreeRTOS",
+  "version": "2.0.0",
+  "description": "VESC UART library for FreeRTOS and ESP-IDF. Fork of SolidGeek/VescUart with the Arduino dependency removed: blocking reads with FreeRTOS timeouts and a per-instance mutex.",
+  "keywords": ["vesc", "uart", "freertos", "esp-idf", "motor"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justneel/VescUart-FreeRTOS.git"
+  },
+  "license": "GPL-3.0-or-later",
+  "frameworks": ["espidf"],
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  },
+  "export": {
+    "exclude": ["examples"]
+  }
+}

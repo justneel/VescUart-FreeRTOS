@@ -1,0 +1,6 @@
+version: "2.0.0"
+description: VESC UART library for FreeRTOS and ESP-IDF (fork of SolidGeek/VescUart without Arduino)
+url: https://github.com/justneel/VescUart-FreeRTOS
+license: GPL-3.0-or-later
+dependencies:
+  idf: ">=5.0"

@@ -1,7 +1,8 @@
 #ifndef _VESCUART_h
 #define _VESCUART_h
 
-#include <Arduino.h>
+#include "VescFreeRTOS.h"
+#include "VescTransport.h"
 #include "datatypes.h"
 #include "buffer.h"
 #include "crc.h"
@@ -9,6 +10,7 @@
 class VescUart
 {
 
+	public:
 	/** Struct to store the telemetry data returned by the VESC */
 	struct dataPackage {
        float avgMotorCurrent;
@@ -42,6 +44,7 @@ class VescUart
         uint8_t minor;
     };
 
+	private:
 	//Timeout - specifies how long the function will wait for the vesc to respond
 	const uint32_t _TIMEOUT;
 
@@ -50,6 +53,7 @@ class VescUart
 		 * @brief      Class constructor
 		 */
 		VescUart(uint32_t timeout_ms = 100);
+		~VescUart();
 
 		/** Variabel to hold measurements returned from VESC */
 		dataPackage data; 
@@ -61,16 +65,10 @@ class VescUart
         FWversionPackage fw_version; 
 
         /**
-         * @brief      Set the serial port for uart communication
-         * @param      port  - Reference to Serial port (pointer) 
+         * @brief      Set the transport (e.g. VescIdfUart) for uart communication
+         * @param      port  - Must outlive this object
          */
-        void setSerialPort(Stream* port);
-
-        /**
-         * @brief      Set the serial port for debugging
-         * @param      port  - Reference to Serial port (pointer) 
-         */
-        void setDebugPort(Stream* port);
+        void setTransport(VescTransport* port);
 
         /**
          * @brief      Populate the firmware version variables
@@ -101,6 +99,12 @@ class VescUart
          * @return     True if successfull otherwise false
          */
         bool getVescValues(uint8_t canId);
+
+        /**
+         * @brief      Like getVescValues(canId), but also copies data to out while holding the
+         *             lock, so another task can't change it in between
+         */
+        bool getVescValues(dataPackage& out, uint8_t canId = 0);
 
         /**
          * @brief      Sends values for joystick and buttons to the nunchuck app
@@ -177,18 +181,20 @@ class VescUart
         void sendKeepalive(uint8_t canId);
 
         /**
-         * @brief      Help Function to print struct dataPackage over Serial for Debug
+         * @brief      Help Function to log struct dataPackage for Debug
          */
         void printVescValues(void);
 
 	private: 
 
-		/** Variabel to hold the reference to the Serial object to use for UART */
-		Stream* serialPort = NULL;
+		/** Variabel to hold the reference to the transport to use for UART */
+		VescTransport* serialPort = NULL;
 
-		/** Variabel to hold the reference to the Serial object to use for debugging. 
-		  * Uses the class Stream instead of HarwareSerial */
-		Stream* debugPort = NULL;
+		/** Serialises access from different tasks, so a reply goes to the task that asked for it */
+		SemaphoreHandle_t mutex;
+#if configSUPPORT_STATIC_ALLOCATION
+		StaticSemaphore_t mutexBuffer;
+#endif
 
 		/**
 		 * @brief      Packs the payload and sends it over Serial
@@ -224,14 +230,6 @@ class VescUart
 		 * @return     True if the process was a success
 		 */
 		bool processReadPacket(uint8_t * message);
-
-		/**
-		 * @brief      Help Function to print uint8_t array over Serial for Debug
-		 *
-		 * @param      data  - Data array to print
-		 * @param      len   - Lenght of the array to print
-		 */
-		void serialPrint(uint8_t * data, int len);
 
 };
 

@@ -1,21 +1,57 @@
 #include <stdint.h>
+#include <string.h>
 #include "VescUart.h"
+
+// Logging goes to ESP_LOG on ESP-IDF. On other FreeRTOS ports, define VESC_LOGD/I/W(fmt, ...)
+// to send it somewhere; by default it is compiled out.
+#if defined(ESP_PLATFORM)
+	#include <esp_log.h>
+	static const char * TAG = "VescUart";
+	#define VESC_LOGD(...) ESP_LOGD(TAG, __VA_ARGS__)
+	#define VESC_LOGI(...) ESP_LOGI(TAG, __VA_ARGS__)
+	#define VESC_LOGW(...) ESP_LOGW(TAG, __VA_ARGS__)
+#else
+	#ifndef VESC_LOGD
+		#define VESC_LOGD(...) ((void) 0)
+	#endif
+	#ifndef VESC_LOGI
+		#define VESC_LOGI(...) ((void) 0)
+	#endif
+	#ifndef VESC_LOGW
+		#define VESC_LOGW(...) ((void) 0)
+	#endif
+#endif
+
+// Holds the VescUart mutex for one scope. It is recursive, so locked methods can call each other.
+class Lock {
+	public:
+		explicit Lock(SemaphoreHandle_t mutex) : mutex(mutex) { xSemaphoreTakeRecursive(mutex, portMAX_DELAY); }
+		~Lock() { xSemaphoreGiveRecursive(mutex); }
+	private:
+		SemaphoreHandle_t mutex;
+};
 
 VescUart::VescUart(uint32_t timeout_ms) : _TIMEOUT(timeout_ms) {
 	nunchuck.valueX         = 127;
 	nunchuck.valueY         = 127;
 	nunchuck.lowerButton  	= false;
 	nunchuck.upperButton  	= false;
+#if configSUPPORT_STATIC_ALLOCATION
+	mutex = xSemaphoreCreateRecursiveMutexStatic(&mutexBuffer);
+#else
+	mutex = xSemaphoreCreateRecursiveMutex();
+	configASSERT(mutex != NULL);
+#endif
 }
 
-void VescUart::setSerialPort(Stream* port)
+VescUart::~VescUart() {
+	vSemaphoreDelete(mutex);
+}
+
+void VescUart::setTransport(VescTransport* port)
 {
+	Lock lock(mutex);
 	serialPort = port;
-}
-
-void VescUart::setDebugPort(Stream* port)
-{
-	debugPort = port;
 }
 
 int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
@@ -33,13 +69,27 @@ int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
 	uint8_t messageReceived[256];
 	uint16_t lenPayload = 0;
 	
-	uint32_t timeout = millis() + _TIMEOUT; // Defining the timestamp for timeout (100ms before timeout)
+	TimeOut_t timeOut;
+	TickType_t remaining = pdMS_TO_TICKS(_TIMEOUT);
+	vTaskSetTimeOutState(&timeOut);
 
-	while ( millis() < timeout && messageRead == false) {
+	while (messageRead == false && xTaskCheckForTimeOut(&timeOut, &remaining) == pdFALSE) {
 
-		while (serialPort->available()) {
+		// Blocks this task until a byte arrives or the time left runs out.
+		uint8_t byte;
+		if (serialPort->read(&byte, 1, remaining) == 1) {
 
-			messageReceived[counter++] = serialPort->read();
+			// Skip bytes until the start of a short packet.
+			if (counter == 0 && byte != 2) {
+				if (byte == 3) {
+					VESC_LOGW("Message is larger than 256 bytes - not supported");
+				} else {
+					VESC_LOGD("Unvalid start bit %u", byte);
+				}
+				continue;
+			}
+
+			messageReceived[counter++] = byte;
 
 			if (counter == 2) {
 
@@ -52,15 +102,9 @@ int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
 
 					case 3:
 						// ToDo: Add Message Handling > 255 (starting with 3)
-						if( debugPort != NULL ){
-							debugPort->println("Message is larger than 256 bytes - not supported");
-						}
 					break;
 
 					default:
-						if( debugPort != NULL ){
-							debugPort->println("Unvalid start bit");
-						}
 					break;
 				}
 			}
@@ -71,16 +115,14 @@ int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
 
 			if (counter == endMessage && messageReceived[endMessage - 1] == 3) {
 				messageReceived[endMessage] = 0;
-				if (debugPort != NULL) {
-					debugPort->println("End of message reached!");
-				}
+				VESC_LOGD("End of message reached!");
 				messageRead = true;
 				break; // Exit if end of message is reached, even if there is still more data in the buffer.
 			}
 		}
 	}
-	if(messageRead == false && debugPort != NULL ) {
-		debugPort->println("Timeout");
+	if(messageRead == false) {
+		VESC_LOGD("Timeout");
 	}
 	
 	bool unpacked = false;
@@ -110,28 +152,17 @@ bool VescUart::unpackPayload(uint8_t * message, int lenMes, uint8_t * payload) {
 	crcMessage &= 0xFF00;
 	crcMessage += message[lenMes - 2];
 
-	if(debugPort!=NULL){
-		debugPort->print("SRC received: "); debugPort->println(crcMessage);
-	}
+	VESC_LOGD("SRC received: %u", crcMessage);
 
 	// Extract payload:
 	memcpy(payload, &message[2], message[1]);
 
 	crcPayload = crc16(payload, message[1]);
 
-	if( debugPort != NULL ){
-		debugPort->print("SRC calc: "); debugPort->println(crcPayload);
-	}
+	VESC_LOGD("SRC calc: %u", crcPayload);
 	
 	if (crcPayload == crcMessage) {
-		if( debugPort != NULL ) {
-			debugPort->print("Received: "); 
-			serialPrint(message, lenMes); debugPort->println();
-
-			debugPort->print("Payload :      ");
-			serialPrint(payload, message[1] - 1); debugPort->println();
-		}
-
+		VESC_LOGD("Received payload of %u bytes, packet id %u", message[1], payload[0]);
 		return true;
 	}else{
 		return false;
@@ -165,9 +196,7 @@ int VescUart::packSendPayload(uint8_t * payload, int lenPay) {
 	messageSend[count++] = 3;
 	// messageSend[count] = NULL;
 	
-	if(debugPort!=NULL){
-		debugPort->print("Package to send: "); serialPrint(messageSend, count);
-	}
+	VESC_LOGD("Package to send: packet id %u, %d bytes", payload[0], count);
 
 	// Sending package
 	if( serialPort != NULL )
@@ -232,7 +261,7 @@ bool VescUart::getFWversion(void){
 }
 
 bool VescUart::getFWversion(uint8_t canId){
-	
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 1 : 3);
 	uint8_t payload[payloadSize];
@@ -243,11 +272,13 @@ bool VescUart::getFWversion(uint8_t canId){
 	}
 	payload[index++] = { COMM_FW_VERSION };
 
+	if (serialPort != NULL)
+		serialPort->flushInput(); // Drop a late reply to an earlier request
 	packSendPayload(payload, payloadSize);
 
 	uint8_t message[256];
 	int messageLength = receiveUartMessage(message);
-	if (messageLength > 0) { 
+	if (messageLength > 2 && message[0] == COMM_FW_VERSION) { 
 		return processReadPacket(message); 
 	}
 	return false;
@@ -258,10 +289,8 @@ bool VescUart::getVescValues(void) {
 }
 
 bool VescUart::getVescValues(uint8_t canId) {
-
-	if (debugPort!=NULL){
-		debugPort->println("Command: COMM_GET_VALUES "+String(canId));
-	}
+	Lock lock(mutex);
+	VESC_LOGD("Command: COMM_GET_VALUES %u", canId);
 
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 1 : 3);
@@ -272,15 +301,26 @@ bool VescUart::getVescValues(uint8_t canId) {
 	}
 	payload[index++] = { COMM_GET_VALUES };
 
+	if (serialPort != NULL)
+		serialPort->flushInput(); // Drop a late reply to an earlier request
 	packSendPayload(payload, payloadSize);
 
 	uint8_t message[256];
 	int messageLength = receiveUartMessage(message);
 
-	if (messageLength > 55) {
+	if (messageLength > 55 && message[0] == COMM_GET_VALUES) {
 		return processReadPacket(message); 
 	}
 	return false;
+}
+
+bool VescUart::getVescValues(dataPackage& out, uint8_t canId) {
+	Lock lock(mutex);
+	if (!getVescValues(canId)) {
+		return false;
+	}
+	out = data;
+	return true;
 }
 void VescUart::setNunchuckValues() {
 	return setNunchuckValues(0);
@@ -288,9 +328,8 @@ void VescUart::setNunchuckValues() {
 
 void VescUart::setNunchuckValues(uint8_t canId) {
 
-	if(debugPort!=NULL){
-		debugPort->println("Command: COMM_SET_CHUCK_DATA "+String(canId));
-	}	
+	Lock lock(mutex);
+	VESC_LOGD("Command: COMM_SET_CHUCK_DATA %u", canId);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 11 : 13);
 	uint8_t payload[payloadSize];
@@ -313,11 +352,7 @@ void VescUart::setNunchuckValues(uint8_t canId) {
 	payload[index++] = 0;
 	payload[index++] = 0;
 
-	if(debugPort != NULL){
-		debugPort->println("Nunchuck Values:");
-		debugPort->print("x="); debugPort->print(nunchuck.valueX); debugPort->print(" y="); debugPort->print(nunchuck.valueY);
-		debugPort->print(" LBTN="); debugPort->print(nunchuck.lowerButton); debugPort->print(" UBTN="); debugPort->println(nunchuck.upperButton);
-	}
+	VESC_LOGD("Nunchuck Values: x=%d y=%d LBTN=%d UBTN=%d", nunchuck.valueX, nunchuck.valueY, nunchuck.lowerButton, nunchuck.upperButton);
 
 	packSendPayload(payload, payloadSize);
 }
@@ -327,6 +362,7 @@ void VescUart::setCurrent(float current) {
 }
 
 void VescUart::setCurrent(float current, uint8_t canId) {
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 5 : 7);
 	uint8_t payload[payloadSize];
@@ -344,6 +380,7 @@ void VescUart::setBrakeCurrent(float brakeCurrent) {
 }
 
 void VescUart::setBrakeCurrent(float brakeCurrent, uint8_t canId) {
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 5 : 7);
 	uint8_t payload[payloadSize];
@@ -363,6 +400,7 @@ void VescUart::setRPM(float rpm) {
 }
 
 void VescUart::setRPM(float rpm, uint8_t canId) {
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 5 : 7);
 	uint8_t payload[payloadSize];
@@ -380,6 +418,7 @@ void VescUart::setDuty(float duty) {
 }
 
 void VescUart::setDuty(float duty, uint8_t canId) {
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 5 : 7);
 	uint8_t payload[payloadSize];
@@ -398,6 +437,7 @@ void VescUart::sendKeepalive(void) {
 }
 
 void VescUart::sendKeepalive(uint8_t canId) {
+	Lock lock(mutex);
 	int32_t index = 0;
 	int payloadSize = (canId == 0 ? 1 : 3);
 	uint8_t payload[payloadSize];
@@ -409,32 +449,20 @@ void VescUart::sendKeepalive(uint8_t canId) {
 	packSendPayload(payload, payloadSize);
 }
 
-void VescUart::serialPrint(uint8_t * data, int len) {
-	if(debugPort != NULL){
-		for (int i = 0; i <= len; i++)
-		{
-			debugPort->print(data[i]);
-			debugPort->print(" ");
-		}
-		debugPort->println("");
-	}
-}
-
 void VescUart::printVescValues() {
-	if(debugPort != NULL){
-		debugPort->print("avgMotorCurrent: "); 	debugPort->println(data.avgMotorCurrent);
-		debugPort->print("avgInputCurrent: "); 	debugPort->println(data.avgInputCurrent);
-		debugPort->print("dutyCycleNow: "); 	debugPort->println(data.dutyCycleNow);
-		debugPort->print("rpm: "); 				debugPort->println(data.rpm);
-		debugPort->print("inputVoltage: "); 	debugPort->println(data.inpVoltage);
-		debugPort->print("ampHours: "); 		debugPort->println(data.ampHours);
-		debugPort->print("ampHoursCharged: "); 	debugPort->println(data.ampHoursCharged);
-		debugPort->print("wattHours: "); 		debugPort->println(data.wattHours);
-		debugPort->print("wattHoursCharged: "); debugPort->println(data.wattHoursCharged);
-		debugPort->print("tachometer: "); 		debugPort->println(data.tachometer);
-		debugPort->print("tachometerAbs: "); 	debugPort->println(data.tachometerAbs);
-		debugPort->print("tempMosfet: "); 		debugPort->println(data.tempMosfet);
-		debugPort->print("tempMotor: "); 		debugPort->println(data.tempMotor);
-		debugPort->print("error: "); 			debugPort->println(data.error);
-	}
+	Lock lock(mutex);
+	VESC_LOGI("avgMotorCurrent: %.2f", data.avgMotorCurrent);
+	VESC_LOGI("avgInputCurrent: %.2f", data.avgInputCurrent);
+	VESC_LOGI("dutyCycleNow: %.2f", data.dutyCycleNow);
+	VESC_LOGI("rpm: %.2f", data.rpm);
+	VESC_LOGI("inputVoltage: %.2f", data.inpVoltage);
+	VESC_LOGI("ampHours: %.2f", data.ampHours);
+	VESC_LOGI("ampHoursCharged: %.2f", data.ampHoursCharged);
+	VESC_LOGI("wattHours: %.2f", data.wattHours);
+	VESC_LOGI("wattHoursCharged: %.2f", data.wattHoursCharged);
+	VESC_LOGI("tachometer: %ld", data.tachometer);
+	VESC_LOGI("tachometerAbs: %ld", data.tachometerAbs);
+	VESC_LOGI("tempMosfet: %.2f", data.tempMosfet);
+	VESC_LOGI("tempMotor: %.2f", data.tempMotor);
+	VESC_LOGI("error: %d", (int) data.error);
 }
