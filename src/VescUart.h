@@ -55,6 +55,10 @@ class VescUart
 		VescUart(uint32_t timeout_ms = 100);
 		~VescUart();
 
+		// Not copyable: a copy would share, and later delete, this object's mutex.
+		VescUart(const VescUart&) = delete;
+		VescUart& operator=(const VescUart&) = delete;
+
 		/** Variabel to hold measurements returned from VESC */
 		dataPackage data; 
 
