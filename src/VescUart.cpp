@@ -183,6 +183,12 @@ int VescUart::packSendPayload(uint8_t * payload, int lenPay) {
 	int count = 0;
 	uint8_t messageSend[256];
 	
+	// Header (up to 3 bytes), CRC (2) and end byte (1) must fit around the payload.
+	if (lenPay > (int) sizeof(messageSend) - 6) {
+		VESC_LOGW("Payload of %d bytes is too long to send", lenPay);
+		return 0;
+	}
+
 	if (lenPay <= 256)
 	{
 		messageSend[count++] = 2;
