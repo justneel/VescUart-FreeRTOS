@@ -2,6 +2,7 @@
 #define _VESCUART_h
 
 #include "VescFreeRTOS.h"
+#include "VescConfig.h"
 #include "VescTransport.h"
 #include "datatypes.h"
 #include "buffer.h"
@@ -184,6 +185,47 @@ class VescUart
          */
         void sendKeepalive(uint8_t canId);
 
+        /** What applySettings() did. */
+        enum class ApplyResult {
+            UNCHANGED,        // Every setting already had its value; nothing was written
+            WRITTEN,          // Changed settings were written, and reading back showed them
+            NO_REPLY,         // The VESC did not send its configuration
+            UNKNOWN_FIRMWARE, // The configuration's signature is not in VescConfLayouts.cpp
+            UNKNOWN_SETTING,  // A setting name is not in this firmware's configuration
+            BAD_VALUE,        // A value does not fit its field's encoding
+            WRITE_FAILED,     // The VESC did not acknowledge the write
+            VERIFY_FAILED,    // Reading back after the write did not show the new values
+        };
+
+        static const char * applyResultName(ApplyResult result);
+
+        /**
+         * @brief      Reads the motor (MCCONF) or app (APPCONF) configuration
+         * @param      out  - Loaded with the VESC's blob; if the signature is unknown, isLoaded() is false
+         *                    and out.signature() tells which one it was
+         * @return     True if the VESC sent a configuration with a known layout
+         */
+        bool getConfig(VescConfKind kind, VescConfig& out, uint8_t canId = 0);
+
+        /**
+         * @brief      Writes a whole configuration, as VESC Tool's write buttons do, and waits for the
+         *             VESC to acknowledge it. Start from a blob read with getConfig() and change fields
+         *             with VescConfig::set(), so every other setting stays as it was.
+         * @param      store  - Save to the VESC's flash. The motor configuration is always saved; for the
+         *                      app configuration, false applies it only until the VESC restarts.
+         * @return     True if the VESC acknowledged it
+         */
+        bool setConfig(const VescConfig& conf, bool store = true, uint8_t canId = 0);
+
+        /**
+         * @brief      Makes the VESC's configuration hold the given values. Reads the configuration,
+         *             changes the named fields, and writes it (saving to flash) only if any of them
+         *             differ, then reads it back to check. Each changed field is logged. Nothing is
+         *             written if any name is unknown or any value does not fit.
+         *             Write while the motor is stopped: the VESC pauses while it saves to flash.
+         */
+        ApplyResult applySettings(VescConfKind kind, const VescSetting* settings, size_t count, uint8_t canId = 0);
+
         /**
          * @brief      Help Function to log struct dataPackage for Debug
          */
@@ -207,25 +249,17 @@ class VescUart
 		 * @param      lenPay   - Length of payload
 		 * @return     The number of bytes send
 		 */
-		int packSendPayload(uint8_t * payload, int lenPay);
+		int packSendPayload(const uint8_t * payload, int lenPay);
 
 		/**
-		 * @brief      Receives the message over Serial
+		 * @brief      Receives one packet, short or long, and checks its CRC
 		 *
-		 * @param      payloadReceived  - The received payload as a unit8_t Array
-		 * @return     The number of bytes receeived within the payload
+		 * @param      payloadReceived  - Where the payload goes
+		 * @param      maxPayload       - Size of payloadReceived; longer packets are dropped
+		 * @param      timeoutMs        - How long to wait; 0 uses the constructor's timeout
+		 * @return     The number of payload bytes, or 0 if none arrived intact
 		 */
-		int receiveUartMessage(uint8_t * payloadReceived);
-
-		/**
-		 * @brief      Verifies the message (CRC-16) and extracts the payload
-		 *
-		 * @param      message  - The received UART message
-		 * @param      lenMes   - The lenght of the message
-		 * @param      payload  - The final payload ready to extract data from
-		 * @return     True if the process was a success
-		 */
-		bool unpackPayload(uint8_t * message, int lenMes, uint8_t * payload);
+		int receiveUartMessage(uint8_t * payloadReceived, size_t maxPayload = 256, uint32_t timeoutMs = 0);
 
 		/**
 		 * @brief      Extracts the data from the received payload
