@@ -525,6 +525,58 @@ bool VescUart::setConfig(const VescConfig& conf, bool store, uint8_t canId) {
 	return replyLength >= 1 && reply[0] == packetId;
 }
 
+static float clampScale(float scale) {
+	return scale < 0.0f ? 0.0f : (scale > 1.0f ? 1.0f : scale);
+}
+
+bool VescUart::setTempCurrentScale(float minScale, float maxScale, uint8_t canId) {
+	Lock lock(mutex);
+
+	// The packet also sets the ERPM, duty and power limits, so send back what the VESC has now.
+	static const char * const KEPT[] = {
+		"l_min_erpm", "l_max_erpm", "l_min_duty", "l_max_duty", "l_watt_min", "l_watt_max",
+	};
+	double kept[sizeof(KEPT) / sizeof(KEPT[0])];
+
+	VescConfig * conf = new (std::nothrow) VescConfig();
+	if (conf == nullptr) {
+		return false;
+	}
+	bool haveLimits = getConfig(VescConfKind::MCCONF, *conf, canId);
+	for (size_t i = 0; haveLimits && i < sizeof(KEPT) / sizeof(KEPT[0]); i++) {
+		haveLimits = conf->get(KEPT[i], kept[i]);
+	}
+	delete conf;
+	if (!haveLimits) {
+		return false;
+	}
+
+	uint8_t request[2 + 5 + 8 * 4];
+	int32_t index = 0;
+	if (canId != 0) {
+		request[index++] = COMM_FORWARD_CAN;
+		request[index++] = canId;
+	}
+	request[index++] = COMM_SET_MCCONF_TEMP;
+	request[index++] = 0; // store
+	request[index++] = 0; // forward to CAN
+	request[index++] = 1; // ack
+	request[index++] = 0; // divide power by the number of controllers
+	buffer_append_float32_auto(request, clampScale(minScale), &index);
+	buffer_append_float32_auto(request, clampScale(maxScale), &index);
+	for (size_t i = 0; i < sizeof(KEPT) / sizeof(KEPT[0]); i++) {
+		buffer_append_float32_auto(request, (float) kept[i], &index);
+	}
+
+	if (serialPort != NULL)
+		serialPort->flushInput();
+	packSendPayload(request, index);
+
+	uint8_t reply[16];
+	const int replyLength = receiveUartMessage(reply, sizeof(reply), CONFIG_READ_TIMEOUT_MS);
+	return replyLength >= 1 && reply[0] == COMM_SET_MCCONF_TEMP;
+}
+
 VescUart::ApplyResult VescUart::applySettings(VescConfKind kind, const VescSetting* settings, size_t count, uint8_t canId) {
 	Lock lock(mutex);
 

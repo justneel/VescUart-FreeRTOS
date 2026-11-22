@@ -227,6 +227,19 @@ class VescUart
         ApplyResult applySettings(VescConfKind kind, const VescSetting* settings, size_t count, uint8_t canId = 0);
 
         /**
+         * @brief      Scales the motor current limits (l_current_min / l_current_max) for now, without
+         *             saving to flash, as VESC Tool's profiles do (COMM_SET_MCCONF_TEMP). The VESC goes
+         *             back to its saved scales when it restarts. The ERPM, duty and power limits are
+         *             read from the VESC and sent back unchanged. Safe while the motor runs.
+         *             getConfig() reports the scaled values until the restart, so a later
+         *             applySettings() write would save them.
+         * @param      minScale  - Braking current scale, 0 to 1
+         * @param      maxScale  - Drive current scale, 0 to 1
+         * @return     True if the VESC acknowledged it
+         */
+        bool setTempCurrentScale(float minScale, float maxScale, uint8_t canId = 0);
+
+        /**
          * @brief      Help Function to log struct dataPackage for Debug
          */
         void printVescValues(void);
